@@ -1,0 +1,97 @@
+---------------------------------------------------------------------------------------------------------------------------------------
+--|ST_Hexagon(bbox around all geometries geometry, bbox geometry geometry, radius of hexagons double precision, target srid integer)|--
+---------------------------------------------------------------------------------------------------------------------------------------
+
+-- Function: ST_Hexagon(geometry, geometry, double precision, integer)
+
+-- DROP FUNCTION ST_Hexagon(geometry, geometry, double precision, integer);
+
+CREATE OR REPLACE FUNCTION ST_Hexagon(
+    IN _bbox_all_ geometry,
+    IN _geom_ geometry,
+    IN _radius_ double precision,
+    IN _srid_ integer)
+  RETURNS TABLE(id bigint, geom geometry) AS
+$BODY$
+
+with 
+parameter as (
+	select 
+		st_xmin(geom) as x,
+		st_ymin(geom) as y,
+		st_xmin(bbox_all) as x_all,
+		st_ymin(bbox_all) as y_all,
+		st_distance(st_makepoint(st_xmin(geom),st_ymin(geom)),st_makepoint(st_xmax(geom),st_ymin(geom))) as x_extent,
+		st_distance(st_makepoint(st_xmin(geom),st_ymin(geom)),st_makepoint(st_xmin(geom),st_ymax(geom))) as y_extent,
+		the_geom,
+		radius,
+		srid
+	from (
+		select 
+			_bbox_all_ as bbox_all,
+			st_transform(_geom_,_srid_) as the_geom,
+			st_envelope((st_dump(st_transform(_geom_,_srid_ ))).geom) as geom,
+			_radius_ as radius,
+			_srid_  as srid
+		) as ua
+	)
+,hexagons as (
+with
+parameter2 as (
+	select 
+		x_all+floor((x-x_all)/(x_offset*2.))*(x_offset*2.) as x_new,
+		y_all+floor((y-y_all)/(radius*1.5*2))*(radius*1.5*2) as y_new,
+		extent_horizontal,
+		extent_vertical,
+		radius,
+		x_offset,
+		y_offset
+	from (
+		select 
+			x,y,
+			x_all,
+			y_all,
+			(ceil(x_extent/(2*radius*cos(30.*2.*pi()/360)))+1)::integer as extent_horizontal,
+			(ceil(y_extent/(2*radius))+1)::integer*3/4 as extent_vertical,-- *3/4 = Korrekturfaktor	
+			radius,
+			radius*1.5 as y_offset,
+			radius*cos(30.*2.*pi()/360) as x_offset
+		from parameter
+		) as ua
+	)
+, parameter3 as (
+	select 
+		generate_series(0,extent_horizontal)*x_offset as x,
+		y_multi*y_offset as y
+	from (select generate_series(0,extent_vertical) as y_multi from parameter2) as b 
+	cross join parameter2
+	)
+, hexagonpair as (
+		select st_convexhull((st_union(st_rotate(st_makeline(st_makepoint(x_new,y_new),st_makepoint(x_new,y_new+radius)),angle,st_makepoint(x_new,y_new))))) as the_geom
+		from parameter2
+		cross join (select generate_series(0,360,60)*2*pi()/360 as angle) as ua
+	union all 
+		select st_convexhull((st_union(
+		st_rotate(st_makeline(st_makepoint(x_new+x_offset,y_new-y_offset),st_makepoint(x_new+x_offset,y_new+radius-y_offset)),angle,st_makepoint(x_new+x_offset,y_new-y_offset))))) as the_geom
+		from parameter2
+		cross join (select generate_series(0,360,60)*2*pi()/360 as angle) as ua
+	)
+	select 
+		row_number() over() as id,
+		st_snaptogrid(st_setsrid(st_translate(the_geom,x*2.,y*2.),_srid_),0.0001) as the_geom, --srid-Variable
+		st_centroid(st_snaptogrid(st_setsrid(st_translate(the_geom,x*2.,y*2.),_srid_),0.0001)) as centroid_geom --srid-Variable
+	from parameter3
+	cross join hexagonpair
+	)
+
+	select 
+		row_number() over() as id,
+		a.the_geom
+	from hexagons as a
+	join parameter as b
+	on st_intersects(a.centroid_geom,b.the_geom)
+
+$BODY$
+  LANGUAGE sql VOLATILE
+  COST 100
+  ROWS 100;
